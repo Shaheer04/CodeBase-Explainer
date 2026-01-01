@@ -32,7 +32,7 @@ const FileTreeItem: React.FC<FileTreeItemProps> = ({
       if (isLoading) return '⏳';
       return isExpanded ? '📂' : '📁';
     }
-    
+
     const ext = file.name.split('.').pop()?.toLowerCase();
     switch (ext) {
       case 'js':
@@ -77,29 +77,40 @@ const FileTreeItem: React.FC<FileTreeItemProps> = ({
   return (
     <div>
       <div
-        className={`flex items-center py-2.5 px-3 cursor-pointer hover:bg-github-dark-bg-secondary transition-all duration-150 relative group ${
-          isSelected ? 'bg-github-dark-bg-secondary border-l-3 border-blue-500 shadow-sm' : 'hover:border-l-3 hover:border-blue-400'
-        }`}
+        className={`flex items-center py-2 px-3 mx-2 my-0.5 rounded-lg cursor-pointer transition-all duration-200 relative group border border-transparent ${isSelected
+            ? 'bg-blue-500/10 border-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.1)]'
+            : 'hover:bg-gray-800/50 hover:border-gray-700/50 text-gray-400 hover:text-gray-200'
+          }`}
         onClick={handleClick}
         style={{ paddingLeft: `${(level * 16) + 12}px` }}
       >
-        <span className="mr-2.5 text-base flex-shrink-0 transition-transform group-hover:scale-110">
+        <span className={`mr-2.5 text-base flex-shrink-0 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''} ${file.type !== 'dir' ? 'group-hover:scale-110' : ''}`}>
           {getIcon(file)}
         </span>
-        <span className={`text-sm truncate flex-1 ${isSelected ? 'font-medium text-blue-400' : 'text-github-dark-text group-hover:text-github-dark-text'}`}>
+        <span className={`text-sm truncate flex-1 font-medium ${isSelected ? 'text-blue-400' : ''}`}>
           {file.name}
         </span>
         {isLoading && (
           <div className="ml-auto flex items-center space-x-1">
-            <div className="w-1 h-1 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-            <div className="w-1 h-1 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-            <div className="w-1 h-1 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+            <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+            <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+            <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
           </div>
+        )}
+
+        {/* Active Indicator Dot */}
+        {isSelected && (
+          <div className="absolute left-1.5 w-1 h-1 bg-blue-400 rounded-full shadow-[0_0_8px_rgba(96,165,250,0.8)]"></div>
         )}
       </div>
 
       {file.type === 'dir' && isExpanded && children.length > 0 && (
-        <div>
+        <div className="relative">
+          {/* Vertical line for hierarchy */}
+          <div
+            className="absolute left-0 top-0 bottom-0 w-px bg-gray-800/50"
+            style={{ left: `${(level * 16) + 19}px` }}
+          ></div>
           {children.map((child) => (
             <FileTreeItem
               key={child.path}
@@ -118,10 +129,10 @@ const FileTreeItem: React.FC<FileTreeItemProps> = ({
 
       {file.type === 'dir' && isExpanded && children.length === 0 && !isLoading && (
         <div
-          className="text-xs text-github-dark-text-secondary italic py-2 flex items-center"
+          className="text-xs text-gray-600 italic py-2 flex items-center"
           style={{ paddingLeft: `${(level + 1) * 16 + 12}px` }}
         >
-          <span className="mr-1">∅</span>
+          <span className="mr-1 opacity-50">∅</span>
           Empty folder
         </div>
       )}
@@ -143,7 +154,7 @@ const FileTree: React.FC = () => {
 
   const toggleDir = async (dir: GitHubFile) => {
     console.log('Toggle directory:', dir.path, 'Currently expanded:', expandedDirs.has(dir.path));
-    
+
     if (expandedDirs.has(dir.path)) {
       setExpandedDirs(prev => {
         const newSet = new Set(prev);
@@ -154,7 +165,7 @@ const FileTree: React.FC = () => {
     } else {
       setLoadingDirs(prev => new Set(prev).add(dir.path));
       console.log('Fetching contents for:', dir.path);
-      
+
       try {
         const contents = await fetchDirectoryContents(dir);
         console.log('Fetched contents:', contents.length, 'items for', dir.path);

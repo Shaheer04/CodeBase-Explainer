@@ -11,6 +11,7 @@ interface RepoContextType {
   fetchRepo: (url: string) => Promise<void>;
   fetchFileContent: (file: GitHubFile) => Promise<void>;
   fetchDirectoryContents: (dir: GitHubFile) => Promise<GitHubFile[]>;
+  resetRepo: () => void;
 }
 
 const RepoContext = createContext<RepoContextType | undefined>(undefined);
@@ -87,6 +88,13 @@ export const RepoProvider: React.FC<RepoProviderProps> = ({ children }) => {
     }
   };
 
+  const resetRepo = () => {
+    setRepo(null);
+    setSelectedFile(null);
+    setFileContents({});
+    setError(null);
+  };
+
   const value = {
     repo,
     selectedFile,
@@ -96,7 +104,8 @@ export const RepoProvider: React.FC<RepoProviderProps> = ({ children }) => {
     setSelectedFile,
     fetchRepo,
     fetchFileContent,
-    fetchDirectoryContents
+    fetchDirectoryContents,
+    resetRepo
   };
 
   return (

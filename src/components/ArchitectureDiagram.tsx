@@ -42,29 +42,56 @@ const ArchitectureDiagram: React.FC<ArchitectureDiagramProps> = ({ apiKey }) => 
       return;
     }
 
+    if (!apiKey) {
+      setError('Gemini API key is required. Please enter your API key above.');
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
     try {
       // Fetch complete repo structure
-      console.log('ArchitectureDiagram: Fetching repo structure...');
+      console.log('ArchitectureDiagram: Starting diagram generation...');
+      console.log('ArchitectureDiagram: Repository:', `${repo.owner}/${repo.name}`);
+      console.log('ArchitectureDiagram: API Key present:', !!apiKey);
+
       const structure = await fetchCompleteRepoStructure(repo.owner, repo.name, '', 3, 0);
-      
-      console.log('ArchitectureDiagram: Structure fetched:', structure);
-      
+
+      console.log('ArchitectureDiagram: Structure fetched successfully:', structure);
+
       if (!structure) {
-        throw new Error('Failed to fetch repository structure');
+        throw new Error('Failed to fetch repository structure - received null response');
       }
 
-      console.log('ArchitectureDiagram: Calling generateArchitectureDiagram with apiKey:', apiKey ? 'Present' : 'Missing');
+      if (!structure.children || structure.children.length === 0) {
+        throw new Error('Repository appears to be empty or inaccessible');
+      }
+
+      console.log('ArchitectureDiagram: Generating diagram with Gemini API...');
       const diagram = await generateArchitectureDiagram(repo.name, structure, apiKey);
-      
+
       console.log('ArchitectureDiagram: Diagram generated successfully');
       setArchitectureDiagram(diagram);
     } catch (err) {
-      console.error('ArchitectureDiagram: Error details:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Failed to generate architecture diagram';
-      console.error('ArchitectureDiagram: Setting error:', errorMessage);
+      console.error('ArchitectureDiagram: Error occurred:', err);
+
+      let errorMessage = 'Failed to generate architecture diagram';
+
+      if (err instanceof Error) {
+        errorMessage = err.message;
+
+        // Add helpful context for common errors
+        if (err.message.includes('rate limit')) {
+          errorMessage += '\n\nTip: GitHub has a rate limit of 60 requests/hour for unauthenticated requests.';
+        } else if (err.message.includes('404') || err.message.includes('not found')) {
+          errorMessage += '\n\nPlease verify the repository exists and is public.';
+        } else if (err.message.includes('API key')) {
+          errorMessage += '\n\nCheck that your Gemini API key is valid at https://aistudio.google.com/app/apikey';
+        }
+      }
+
+      console.error('ArchitectureDiagram: Final error message:', errorMessage);
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -74,20 +101,70 @@ const ArchitectureDiagram: React.FC<ArchitectureDiagramProps> = ({ apiKey }) => 
   useEffect(() => {
     if (architectureDiagram && diagramRef.current) {
       // Extract mermaid code from markdown code blocks if present
-      let mermaidCode = architectureDiagram;
-      const match = architectureDiagram.match(/```mermaid\n([\s\S]*?)```/);
-      if (match) {
-        mermaidCode = match[1];
-      } else if (architectureDiagram.includes('```')) {
-        // Try to extract any code block
-        const genericMatch = architectureDiagram.match(/```\n?([\s\S]*?)```/);
-        if (genericMatch) {
-          mermaidCode = genericMatch[1];
+      let mermaidCode = architectureDiagram.trim();
+
+      console.log('Raw diagram content:', mermaidCode.substring(0, 200));
+
+      // Try multiple patterns to extract mermaid code
+      const patterns = [
+        /```mermaid\s*\n([\s\S]*?)```/,           // ```mermaid\n...\n```
+        /```mermaid\s+([\s\S]*?)```/,              // ```mermaid ...```
+        /```\s*mermaid\s*\n([\s\S]*?)```/,         // ``` mermaid\n...\n```
+        /```\s*\n?([\s\S]*?)```/,                   // ```\n...``` or ```...```
+      ];
+
+      for (const pattern of patterns) {
+        const match = mermaidCode.match(pattern);
+        if (match && match[1]) {
+          mermaidCode = match[1].trim();
+          console.log('Extracted mermaid code using pattern:', pattern);
+          break;
         }
       }
 
-      // Clean up the mermaid code
-      mermaidCode = mermaidCode.trim();
+      // Remove any remaining markdown artifacts
+      mermaidCode = mermaidCode
+        .replace(/^```mermaid\s*/i, '')
+        .replace(/^```\s*/, '')
+        .replace(/```\s*$/, '')
+        .trim();
+
+      // Additional client-side validation and cleanup
+      const lines = mermaidCode.split('\n');
+      const cleanLines: string[] = [];
+
+      for (let line of lines) {
+        const trimmedLine = line.trim();
+
+        // Skip empty lines
+        if (!trimmedLine) {
+          cleanLines.push(line);
+          continue;
+        }
+
+        // CRITICAL: Remove lines with ONLY dashes/decorators
+        if (/^[-=_*#]+$/.test(trimmedLine)) {
+          console.log('Client: Removing decorative line:', trimmedLine);
+          continue;
+        }
+
+        // Remove inline comments that might break parsing
+        line = line.replace(/\s*%%.*$/, '');
+
+        // Ensure subgraph names are quoted
+        if (trimmedLine.startsWith('subgraph') && !line.includes('"') && !line.includes("'")) {
+          line = line.replace(/subgraph\s+([^"\s]+)/, 'subgraph "$1"');
+        }
+
+        // Fix node IDs with dashes
+        line = line.replace(/\b([A-Za-z0-9]+)-([A-Za-z0-9]+)/g, '$1_$2');
+
+        cleanLines.push(line);
+      }
+
+      mermaidCode = cleanLines.join('\n').trim();
+
+      console.log('Final mermaid code to render:', mermaidCode.substring(0, 200));
 
       // Clear previous diagram
       diagramRef.current.innerHTML = '';
@@ -95,26 +172,25 @@ const ArchitectureDiagram: React.FC<ArchitectureDiagramProps> = ({ apiKey }) => 
 
       // Create a unique ID for the diagram
       const id = `mermaid-${Date.now()}`;
-      
+
       try {
-        console.log('Rendering mermaid code:', mermaidCode);
         mermaid.render(id, mermaidCode).then(({ svg }) => {
           if (diagramRef.current) {
             diagramRef.current.innerHTML = svg;
           }
         }).catch((err) => {
           console.error('Mermaid rendering error:', err);
+          console.error('Failed code snippet:', mermaidCode.substring(0, 500));
           if (diagramRef.current) {
             diagramRef.current.innerHTML = `
               <div class="text-red-400 p-4 bg-red-900 bg-opacity-20 rounded">
                 <p class="font-semibold mb-2">Failed to render diagram</p>
-                <p class="text-sm">The diagram syntax may be invalid. Error: ${err.message || 'Unknown error'}</p>
-                <button 
-                  onclick="this.parentElement.parentElement.parentElement.querySelector('details').open = true"
-                  class="mt-2 text-xs underline"
-                >
-                  View source code to debug
-                </button>
+                <p class="text-sm mb-2">The diagram syntax may be invalid. Error: ${err.message || 'Unknown error'}</p>
+                <p class="text-xs text-gray-400 mb-2">This usually happens when the AI generates invalid Mermaid syntax. Try regenerating.</p>
+                <details class="mt-2">
+                  <summary class="text-xs underline cursor-pointer">View problematic code</summary>
+                  <pre class="mt-2 text-xs bg-gray-800 p-2 rounded overflow-x-auto">${mermaidCode.substring(0, 1000)}</pre>
+                </details>
               </div>
             `;
           }
@@ -249,8 +325,8 @@ const ArchitectureDiagram: React.FC<ArchitectureDiagramProps> = ({ apiKey }) => 
           </div>
 
           <div className="bg-github-dark-bg p-6 rounded-lg border border-github-dark-border overflow-auto">
-            <div 
-              ref={diagramRef} 
+            <div
+              ref={diagramRef}
               className="mermaid-diagram flex justify-center"
               style={{ minHeight: '400px' }}
             />

@@ -65,12 +65,12 @@ export const generateFileExplanation = async (
   const fileExtension = filePath.split('.').pop()?.toLowerCase() || '';
   const lineCount = fileContent.split('\n').length;
   const charCount = fileContent.length;
-  
+
   // Send full file when possible for complete context
   const maxChars = 15000;
   let contentToSend = fileContent;
   let isTruncated = false;
-  
+
   if (charCount > maxChars) {
     isTruncated = true;
     const halfLimit = Math.floor(maxChars / 2);
@@ -161,10 +161,10 @@ export const generateCodeQuestionResponse = async (
 ): Promise<Explanation> => {
   const charCount = fileContent.length;
   const maxChars = 12000;
-  
+
   let contentToSend = fileContent;
   let isTruncated = false;
-  
+
   if (charCount > maxChars) {
     isTruncated = true;
     const halfLimit = Math.floor(maxChars / 2);
@@ -172,7 +172,7 @@ export const generateCodeQuestionResponse = async (
     const end = fileContent.substring(fileContent.length - halfLimit);
     contentToSend = `${start}\n\n... [middle section omitted] ...\n\n${end}`;
   }
-  
+
   const prompt = `You are answering a question about the file "${filePath}" from the ${repoName} repository.
 
 USER QUESTION: "${question}"
@@ -214,11 +214,11 @@ export const generateBatchFunctionExplanations = async (
   apiKey: string
 ): Promise<Record<string, string>> => {
   if (functions.length === 0) return {};
-  
-  const functionsText = functions.map((func, idx) => 
+
+  const functionsText = functions.map((func, idx) =>
     `FUNCTION_${idx + 1}: ${func.name}\n\`\`\`\n${func.code.slice(0, 500)}\n\`\`\``
   ).join('\n\n');
-  
+
   const prompt = `Explain each function below in 1-2 sentences. Be specific about what each does.
 
 ${functionsText}
@@ -229,10 +229,10 @@ FUNCTION_2: [explanation]
 ...`;
 
   const result = await callGeminiAPI(prompt, apiKey);
-  
+
   const explanations: Record<string, string> = {};
   const lines = result.content.split('\n');
-  
+
   functions.forEach((func, idx) => {
     const pattern = `FUNCTION_${idx + 1}:`;
     const line = lines.find(l => l.trim().startsWith(pattern));
@@ -243,7 +243,7 @@ FUNCTION_2: [explanation]
       explanations[func.name] = 'No explanation available';
     }
   });
-  
+
   return explanations;
 };
 
@@ -252,139 +252,255 @@ export const generateArchitectureDiagram = async (
   repoStructure: any,
   apiKey: string
 ): Promise<string> => {
-  // Extract minimal structured information
-  const extractMinimalInfo = (struct: any): { dirs: string[], files: string[] } => {
-    const info = { dirs: [] as string[], files: [] as string[] };
-    
-    if (struct.children && Array.isArray(struct.children)) {
-      struct.children.forEach((child: any) => {
-        if (child.type === 'dir') {
-          info.dirs.push(child.name);
-        } else if (child.type === 'file') {
-          info.files.push(child.name);
-        }
-      });
+  // CONFIGURATION: Token budget management
+  const MAX_TREE_DEPTH = 3;
+  const MAX_CHILDREN_PER_DIR = 20;
+
+  /**
+   * Generates a concise text-based tree representation
+   */
+  const generateTreeRepresentation = (node: any, prefix: string = '', depth: number = 0): string => {
+    if (depth > MAX_TREE_DEPTH) return '';
+
+    // Sort directories first, then files
+    const children = (node.children || []).sort((a: any, b: any) => {
+      if (a.type === 'dir' && b.type !== 'dir') return -1;
+      if (a.type !== 'dir' && b.type === 'dir') return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    let output = '';
+    const relevantChildren = children.filter((c: any) => {
+      const ignored = [
+        'node_modules', '.git', '.vscode', '.idea', 'dist', 'build', 'coverage',
+        'package-lock.json', 'yarn.lock', '.DS_Store'
+      ];
+      return !ignored.some(pattern => c.name === pattern || c.name.startsWith(pattern));
+    });
+
+    const visibleChildren = relevantChildren.slice(0, MAX_CHILDREN_PER_DIR);
+    const hiddenCount = relevantChildren.length - visibleChildren.length;
+
+    visibleChildren.forEach((child: any, index: number) => {
+      const isLast = index === visibleChildren.length - 1 && hiddenCount === 0;
+      const marker = isLast ? '└── ' : '├── ';
+      const newPrefix = prefix + (isLast ? '    ' : '│   ');
+
+      output += `${prefix}${marker}${child.name}${child.type === 'dir' ? '/' : ''}\n`;
+
+      if (child.type === 'dir') {
+        output += generateTreeRepresentation(child, newPrefix, depth + 1);
+      }
+    });
+
+    if (hiddenCount > 0) {
+      output += `${prefix}└── ... (${hiddenCount} more files)\n`;
     }
-    
-    return info;
+
+    return output;
   };
 
-  const { dirs, files } = extractMinimalInfo(repoStructure);
-  const topDirs = dirs.slice(0, 6).join(', ');
-  const topFiles = files.slice(0, 8).join(', ');
-  
-  console.log('Architecture diagram - Dirs:', dirs.length, 'Files:', files.length);
+  const treeStructure = generateTreeRepresentation(repoStructure);
 
-  const prompt = `Create mermaid architecture diagram for "${repoName}". 
-Dirs: ${topDirs}
-Files: ${topFiles}
+  // Calculate stats for context
+  const fileCount = JSON.stringify(repoStructure).match(/"type":"file"/g)?.length || 0;
+  const dirCount = JSON.stringify(repoStructure).match(/"type":"dir"/g)?.length || 0;
 
-Show 4 layers (UI, Logic, Service, Data) with arrows. Use actual names above. Return ONLY mermaid code starting with \`\`\`mermaid`;
+  const prompt = `You are a Senior Software Architect. Analyze the codebase structure and generate a tailored Technical Architecture Diagram in JSON format.
 
-  console.log('Architecture diagram - Prompt length:', prompt.length);
-  
-  // Retry logic with exponential backoff for rate limiting
+CONTEXT:
+- Repository: ${repoName}
+- Files: ~${fileCount} | Directories: ~${dirCount}
+
+FILE STRUCTURE (TreeMap):
+\`\`\`
+${treeStructure}
+\`\`\`
+
+INSTRUCTIONS:
+1. **Analyze** the structure to identify architectural patterns (MVC, Microservices, Monolith, Clean Arch).
+2. **Infer** logical components from naming conventions (e.g., 'auth-controller' -> 'API/Auth', 'users-db' -> 'Data/Users').
+3. **Group** components into meaningful layers/modules (e.g., 'Frontend', 'Backend API', 'Database Layer').
+4. **Define** relationships to show data flow (e.g., UI -> API -> Service -> DB).
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON object matching this TypeScript interface:
+
+\`\`\`typescript
+interface DiagramData {
+  // Logical groupings (subgraphs)
+  modules: {
+    id: string;       // unique alphanumeric id, e.g., "backend_api"
+    label: string;    // display name, e.g., "Backend API"
+    components: {
+      id: string;     // unique alphanumeric id, e.g., "auth_controller"
+      label: string;  // display name, e.g., "Auth Controller"
+    }[];
+  }[];
+  // Connections between components
+  relationships: {
+    from: string;     // component id
+    to: string;       // component id
+    type: 'solid' | 'dotted'; // solid = flow/call, dotted = dependency/reference
+    label?: string;   // optional edge label
+  }[];
+}
+\`\`\`
+
+CONSTRAINTS:
+- IDs must be alphanumeric using underscores (no spaces/dashes).
+- Keep it high-level: 15-25 nodes maximum.
+- Do NOT output Mermaid code directly. Output strictly JSON.
+- Ensure 'from' and 'to' in relationships match defined component IDs.
+
+GENERATE JSON NOW:`;
+
+  console.log('Architecture diagram - JSON Prompt length:', prompt.length);
+
+  // Apply global rate limiting
+  await waitForRateLimit();
+
+  // Retry logic
   const maxRetries = 3;
   let lastError: any = null;
-  
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       if (attempt > 0) {
-        const waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
-        console.log(`Rate limit retry attempt ${attempt + 1}/${maxRetries}, waiting ${waitTime}ms...`);
+        // Default backoff
+        let waitTime = Math.pow(2, attempt) * 2000; // Increased to 2s base
+        console.log(`Retry attempt ${attempt + 1}/${maxRetries} for JSON generation...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
-      
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, { // Using 2.0 Flash as in callGeminiAPI
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
-            temperature: 0.4,
-            maxOutputTokens: 800,
+            temperature: 0.2,
+            maxOutputTokens: 2000,
             topK: 40,
-            topP: 0.85
+            topP: 0.8,
+            responseMimeType: "application/json" // Force JSON output
           }
         })
       });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        const errorMsg = errorData?.error?.message || errorData?.error?.status || `HTTP ${response.status}`;
-        
-        console.error('API Error Response:', {
-          status: response.status,
-          statusText: response.statusText,
-          errorData: errorData,
-          fullError: JSON.stringify(errorData)
-        });
-        
+
+        // Handle Rate Limits specifically
         if (response.status === 429) {
           const retryAfter = response.headers.get('Retry-After');
-          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt + 1) * 1000;
-          lastError = new Error(`API rate limit exceeded. Please wait ${Math.ceil(waitTime / 1000)} seconds and try again.`);
-          
-          if (attempt < maxRetries - 1) {
-            console.log(`Rate limited, will retry in ${waitTime}ms...`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            continue;
-          }
-          throw lastError;
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt + 2) * 1000;
+
+          console.error('🚨 Gemini API Rate Limit Hit during Diagram Generation!');
+          console.warn(`Waiting ${Math.ceil(waitTime / 1000)}s before retry...`);
+
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          // Don't count this as a normal attempt if we waited properly? 
+          // actually standard loop is fine as long as we wait.
+          // But let's throw to trigger the loop continue
+          lastError = { status: 429, message: 'Rate limit exceeded' };
+          continue;
         }
-        
-        if (response.status === 404) {
-          throw new Error(`Model not found: gemini-2.5-flash may not be available yet. Error: ${errorMsg}`);
-        }
-        
-        if (response.status === 400) {
-          throw new Error(`Bad request: ${errorMsg}. Check if the model name is correct and API key is valid.`);
-        }
-        
-        throw new Error(`API error: ${response.status} - ${errorMsg}`);
+
+        throw new Error(`API error: ${response.status} - ${JSON.stringify(errorData)}`);
       }
 
       const data = await response.json();
-      
-      if (data.error) {
-        throw new Error(data.error.message || 'API error');
-      }
-
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      
-      if (!text) {
-        console.error('No text in response. Full API response:', JSON.stringify(data, null, 2));
-        console.error('Candidates:', data.candidates);
-        console.error('Finish reason:', data.candidates?.[0]?.finishReason);
-        console.error('Safety ratings:', data.candidates?.[0]?.safetyRatings);
-        
-        const finishReason = data.candidates?.[0]?.finishReason;
-        if (finishReason === 'SAFETY') {
-          throw new Error('Content was blocked by safety filters. Try simplifying the prompt.');
-        }
-        if (finishReason === 'RECITATION') {
-          throw new Error('Content blocked due to recitation concerns.');
-        }
-        if (finishReason === 'MAX_TOKENS') {
-          throw new Error('Response exceeded token limit.');
-        }
-        
-        throw new Error(`No diagram generated. Finish reason: ${finishReason || 'Unknown'}`);
+
+      if (!text) throw new Error('No content returned from API');
+
+      // Parse JSON from response
+      let diagramData: any;
+      try {
+        // Clean markdown code blocks if present (though responseMimeType should prevent this)
+        const jsonStr = text.replace(/^```json\s*/, '').replace(/```\s*$/, '').trim();
+        diagramData = JSON.parse(jsonStr);
+      } catch (e) {
+        console.error('Failed to parse Gemini JSON:', text);
+        throw new Error('AI returned invalid JSON');
       }
 
-      console.log('Architecture diagram - Generated successfully');
-      return text;
-    } catch (error) {
-      console.error(`Architecture diagram - Attempt ${attempt + 1} failed:`, error);
+      // Convert JSON to valid Mermaid
+      return convertJsonToMermaid(diagramData);
+
+    } catch (error: any) {
+      console.error(`Attempt ${attempt + 1} failed:`, error);
       lastError = error;
-      
-      if (attempt === maxRetries - 1 || (error instanceof Error && !error.message.includes('rate limit'))) {
-        throw error;
-      }
+
+      // If it was a 429 that we already handled appropriately, we might want to continue.
+      // If it's a fatal error, maybe break? But for now, simple retry is safer.
     }
   }
-  
-  throw lastError || new Error('Failed to generate diagram after retries');
+
+  // If we're here, we failed. Check if it was a rate limit to give a better error.
+  if (lastError?.status === 429) {
+    // Return a special error string that ArchitectureDiagram.tsx can parse? 
+    // Or just throw a friendly error.
+    throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+  }
+
+  throw lastError || new Error('Failed to generate diagram');
+};
+
+/**
+ * Converts the structured JSON architecture data into valid Mermaid syntax
+ * guaranteeing correct quoting and escaping.
+ */
+const convertJsonToMermaid = (data: any): string => {
+  if (!data || !data.modules || !Array.isArray(data.modules)) {
+    throw new Error('Invalid diagram data structure');
+  }
+
+  let mermaid = 'graph TD\n';
+  const validIds = new Set<string>();
+
+  // 1. Process Modules & Components
+  data.modules.forEach((mod: any) => {
+    // Sanitize module label
+    const safeModLabel = (mod.label || 'Module').replace(/"/g, "'");
+
+    mermaid += `    subgraph "${safeModLabel}"\n`;
+
+    if (Array.isArray(mod.components)) {
+      mod.components.forEach((comp: any) => {
+        // Ensure ID is safe (alphanumeric + underscore)
+        const safeId = (comp.id || 'node').replace(/[^a-zA-Z0-9_]/g, '_');
+        validIds.add(safeId);
+
+        // Ensure label is strictly quoted
+        const safeLabel = (comp.label || safeId).replace(/"/g, "'");
+
+        mermaid += `        ${safeId}["${safeLabel}"]\n`;
+      });
+    }
+
+    mermaid += `    end\n`;
+  });
+
+  // 2. Process Relationships
+  if (Array.isArray(data.relationships)) {
+    data.relationships.forEach((rel: any) => {
+      const fromId = (rel.from || '').replace(/[^a-zA-Z0-9_]/g, '_');
+      const toId = (rel.to || '').replace(/[^a-zA-Z0-9_]/g, '_');
+
+      // Only draw edges between valid, existing nodes to prevent ghost nodes
+      if (validIds.has(fromId) && validIds.has(toId)) {
+        const arrow = rel.type === 'dotted' ? '-.->' : '-->';
+        mermaid += `    ${fromId} ${arrow} ${toId}\n`;
+      }
+    });
+  }
+
+  // 3. Styling (Optional: Add common class)
+  mermaid += '\n    classDef default fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff;';
+
+  return mermaid;
 };
 
 const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanation> => {
@@ -397,7 +513,7 @@ const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanatio
 
   // Use Gemini 2.5 Flash everywhere
   const modelNames = [
-      'gemini-2.5-flash',
+    'gemini-2.5-flash',
   ];
 
   let lastError: any = null;
@@ -411,7 +527,7 @@ const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanatio
           console.log(`Retry attempt ${attempt + 1}/${maxRetries} for ${modelName}, waiting ${waitTime}ms...`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
         }
-        
+
         console.log(`Trying model: ${modelName} (attempt ${attempt + 1})`);
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`, {
           method: 'POST',
@@ -436,22 +552,22 @@ const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanatio
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
           console.error(`Model ${modelName} failed with status ${response.status}:`, errorData);
-          
+
           // Handle rate limiting with retry
           if (response.status === 429) {
             const retryAfter = response.headers.get('Retry-After');
-            const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt + 2) * 1000;
-            
+            const waitTime = retryAfter ? parseInt(retryAfter || '0') * 1000 : Math.pow(2, attempt + 2) * 1000;
+
             console.error('🚨 Gemini API Rate Limit Hit!');
             console.error(`Free tier limits: 15 requests/min, 1500 requests/day`);
             console.error(`Wait time: ${Math.ceil(waitTime / 1000)} seconds`);
-            
+
             lastError = {
               status: 429,
               message: `Gemini API rate limit exceeded! Free tier: 15 requests/min, 1500/day. Wait ${Math.ceil(waitTime / 1000)}s. Consider: 1) Wait a minute 2) Use fewer AI features 3) Upgrade API tier`,
               details: errorData
             };
-            
+
             if (attempt < maxRetries - 1) {
               console.log(`Rate limited, waiting ${waitTime}ms before retry...`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -463,61 +579,61 @@ const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanatio
           break; // Move to next model
         }
 
-      const data = await response.json();
+        const data = await response.json();
 
-      if (data.error) {
-        console.error(`Model ${modelName} returned error:`, data.error);
-        lastError = data.error;
-        break; // Move to next model
-      }
-
-      // Check response structure
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      
-      if (!text) {
-        console.error(`Model ${modelName} returned no text.`);
-        console.error('Finish reason:', data.candidates?.[0]?.finishReason);
-        console.error('Has candidates:', !!data.candidates);
-        console.error('Candidates length:', data.candidates?.length);
-        
-        // Check if content was blocked
-        if (data.candidates?.[0]?.finishReason === 'SAFETY') {
-          lastError = 'Content blocked by safety filters';
-        } else if (data.candidates?.[0]?.finishReason === 'RECITATION') {
-          lastError = 'Content blocked due to recitation';
-        } else if (data.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
-          lastError = 'Response too long, truncated';
-        } else if (data.candidates?.[0]?.finishReason) {
-          lastError = `Generation stopped: ${data.candidates[0].finishReason}`;
-        } else if (!data.candidates || data.candidates.length === 0) {
-          lastError = 'API returned empty candidates array - possible content filter';
-        } else {
-          lastError = 'No text in response - check console for details';
+        if (data.error) {
+          console.error(`Model ${modelName} returned error:`, data.error);
+          lastError = data.error;
+          break; // Move to next model
         }
-        break; // Move to next model
-      }
 
-      console.log(`Successfully generated with model: ${modelName}`);
-      
-      return {
-        content: text,
-        codeSnippets: extractCodeSnippets(text)
-      };
-    } catch (error) {
-      console.warn(`Model ${modelName} attempt ${attempt + 1} failed:`, error);
-      lastError = error;
-      
-      if (attempt === maxRetries - 1) {
-        break; // Move to next model after all retries
+        // Check response structure
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!text) {
+          console.error(`Model ${modelName} returned no text.`);
+          console.error('Finish reason:', data.candidates?.[0]?.finishReason);
+          console.error('Has candidates:', !!data.candidates);
+          console.error('Candidates length:', data.candidates?.length);
+
+          // Check if content was blocked
+          if (data.candidates?.[0]?.finishReason === 'SAFETY') {
+            lastError = 'Content blocked by safety filters';
+          } else if (data.candidates?.[0]?.finishReason === 'RECITATION') {
+            lastError = 'Content blocked due to recitation';
+          } else if (data.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+            lastError = 'Response too long, truncated';
+          } else if (data.candidates?.[0]?.finishReason) {
+            lastError = `Generation stopped: ${data.candidates[0].finishReason}`;
+          } else if (!data.candidates || data.candidates.length === 0) {
+            lastError = 'API returned empty candidates array - possible content filter';
+          } else {
+            lastError = 'No text in response - check console for details';
+          }
+          break; // Move to next model
+        }
+
+        console.log(`Successfully generated with model: ${modelName}`);
+
+        return {
+          content: text,
+          codeSnippets: extractCodeSnippets(text)
+        };
+      } catch (error) {
+        console.warn(`Model ${modelName} attempt ${attempt + 1} failed:`, error);
+        lastError = error;
+
+        if (attempt === maxRetries - 1) {
+          break; // Move to next model after all retries
+        }
       }
-    }
     }
   }
 
   // If all models failed, provide detailed error
   const errorMessage = lastError ? JSON.stringify(lastError, null, 2) : 'Unknown error';
   console.error('All models failed. Last error:', lastError);
-  
+
   // Check if it's a rate limit error
   if (lastError?.status === 429 || lastError?.message?.includes('rate limit')) {
     return {
@@ -531,6 +647,7 @@ const callGeminiAPI = async (prompt: string, apiKey: string): Promise<Explanatio
     codeSnippets: []
   };
 };
+
 
 const extractCodeSnippets = (text: string): string[] => {
   const regex = /```[\s\S]*?```/g;
